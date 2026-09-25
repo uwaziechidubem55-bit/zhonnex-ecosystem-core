@@ -1,0 +1,23 @@
+{
+  "brand": "ZHONNEX CORP",
+  "version": "1.0.0-alpha.1",
+  "theme": {
+    "colors": {
+      "matrix_void_black": "#030303",
+      "imperial_cyan_core": "#00f0ff",
+      "velocity_gold": "#ffbc00",
+      "quantum_slate_dark": "#121214",
+      "security_pass_green": "#00ff66",
+      "security_fail_red": "#ff003c"
+    },
+    "typography": {
+      "primary_font": "Inter, sans-serif",
+      "display_font": "Orbitron, sans-serif",
+      "mono_font": "JetBrains Mono, monospace"
+    },
+    "animation": {
+      "liquid_transition": "all 0.3s cubic-bezier(0.25, 0.8, 0.25, 1)",
+      "ui_pulse_glow": "glow 2s infinite ease-in-out"
+    }
+  }
+}
