@@ -1,0 +1,27 @@
+{
+  "name": "zhonnex-ecosystem-core",
+  "version": "1.0.0",
+  "private": true,
+  "engines": {
+    "node": ">=20.0.0",
+    "npm": ">=10.0.0"
+  },
+  "workspaces": [
+    "core-applications/**",
+    "commerce-finance/**",
+    "shared-packages/**"
+  ],
+  "scripts": {
+    "system:compile:release": "cd core-system && cargo build --release --locked",
+    "ecosystem:telemetry:test": "turbo run test --parallel",
+    "ecosystem:production:build": "turbo run build --cache-dir=.turbo"
+  },
+  "dependencies": {
+    "@supabase/supabase-js": "^2.45.0",
+    "firebase-admin": "^12.0.0"
+  },
+  "devDependencies": {
+    "turbo": "^2.1.2",
+    "typescript": "^5.5.4"
+  }
+}
