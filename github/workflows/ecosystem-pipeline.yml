@@ -1,0 +1,63 @@
+name: "Zhonnex Corp Core Ecosystem Production Pipeline"
+
+on:
+  push:
+    branches: [ "main" ]
+  pull_request:
+    branches: [ "main" ]
+
+jobs:
+  compile-system-core:
+    name: "Heavy Industry Native Compilation (Rust)"
+    runs-on: ubuntu-latest
+    steps:
+      - name: "Checkout Source Matrix"
+        uses: actions/checkout@v4
+
+      - name: "Initialize Production Rust Toolchain"
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+
+      - name: "Cache Cargo Dependencies"
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/bin/
+            ~/.cargo/registry/index/
+            ~/.cargo/registry/cache/
+            ~/.cargo/git/db/
+            core-system/target/
+          key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
+
+      - name: "Execute Safety Audits & Linting"
+        run: |
+          cd core-system
+          if [ -f Cargo.toml ]; then cargo clippy -- -D warnings; fi
+
+      - name: "Build Multi-Domain Autonomous Core (MX Suite)"
+        run: |
+          cd core-system
+          if [ -f Cargo.toml ]; then cargo build --release --locked; fi
+
+  compile-application-suite:
+    name: "Enterprise Application & Commercial Framework (TypeScript)"
+    runs-on: ubuntu-latest
+    steps:
+      - name: "Checkout Source Matrix"
+        uses: actions/checkout@v4
+
+      - name: "Initialize Enterprise Node Environment"
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: 'npm'
+
+      - name: "Install Monorepo Workspace Dependencies"
+        run: npm ci
+
+      - name: "Verify TypeScript Compiler Constraints"
+        run: npx tsc --noEmit
+
+      - name: "Execute Concurrent Production Caching"
+        run: npm run ecosystem:production:build
