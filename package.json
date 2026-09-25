@@ -13,7 +13,7 @@
   ],
   "scripts": {
     "system:compile:release": "cd core-system && cargo build --release --locked",
-    "ecosystem:telemetry:test": "turbo run test --parallel",
+    "mx-suite:test": "cd core-system/mx-suite && cargo test",
     "ecosystem:production:build": "turbo run build --cache-dir=.turbo"
   },
   "dependencies": {
