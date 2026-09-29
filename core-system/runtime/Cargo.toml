@@ -1,0 +1,10 @@
+[package]
+name = "zhonnex-runtime"
+version = "1.0.0"
+edition = "2021"
+publish = false
+description = "Zhonnex core engine runtime"
+
+[lib]
+name = "zhonnex_runtime"
+path = "config.rs"
