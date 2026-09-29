@@ -1,5 +1,6 @@
 pub mod guidance;
 pub mod iot_license;
+pub mod sensor_link;
 
 #[cfg(test)]
 mod tests {
