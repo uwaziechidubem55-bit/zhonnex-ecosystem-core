@@ -12,6 +12,7 @@
   "include": [
     "core-applications/**/*.ts",
     "commerce-finance/**/*.ts",
-    "shared-packages/**/*.ts"
+    "shared-packages/**/*.ts",
+    "resolve/**/*.ts"
   ]
 }
