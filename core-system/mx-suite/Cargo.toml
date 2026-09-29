@@ -1,0 +1,9 @@
+[package]
+name = "mx-suite"
+version = "1.0.0"
+edition = "2021"
+publish = false
+description = "Zhonnex MX Suite — multi-domain guidance and onboard license lock"
+
+[lib]
+path = "lib.rs"
