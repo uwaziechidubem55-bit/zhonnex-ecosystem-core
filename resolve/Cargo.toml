@@ -1,0 +1,13 @@
+[package]
+name = "zhonnex-resolve"
+version = "1.0.0"
+edition = "2021"
+publish = false
+description = "Resolve — Zhonnex autonomous control for every transport mode. Not part of MX Suite."
+
+[[bin]]
+name = "resolve"
+path = "src/main.rs"
+
+[lib]
+path = "src/lib.rs"
