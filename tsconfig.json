@@ -11,6 +11,7 @@
   },
   "include": [
     "core-applications/**/*.ts",
-    "commerce-finance/**/*.ts"
+    "commerce-finance/**/*.ts",
+    "shared-packages/**/*.ts"
   ]
 }
