@@ -43,7 +43,7 @@ export const zhonnexIdentityClient: SupabaseClient = createClient(
 /**
  * Validates a user's ecosystem authentication status and extracts their profile boundary
  */
-export async function verifyAndFetchProfile(bearerToken: string): Promise {
+export async function verifyAndFetchProfile(bearerToken: string): Promise<ZhonnexIdentityProfile | null> {
   const { data: { user }, error: authError } = await zhonnexIdentityClient.auth.getUser(bearerToken);
   
   if (authError || !user) {
