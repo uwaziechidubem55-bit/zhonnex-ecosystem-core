@@ -1,5 +1,6 @@
 import { zhonnexIdentityClient } from '../../core-applications/identity-auth/supabase/client';
 import { velocityLedgerDb } from '../finance-ledger/firebase/ledger';
+import { openSevenLayers, sealSevenLayers } from '../../shared-packages/seven-layer-cipher';
 import * as crypto from 'crypto';
 
 interface LegacyDataPayload {
@@ -15,6 +16,8 @@ interface LegacyDataPayload {
 /**
  * Enterprise Multi-Generational Data Preserver.
  * Bridges long-term file holding with autonomous ecosystem funding logs.
+ * The IPFS locator is sealed with seven AES-256-GCM layers before it is written.
+ * The hereditary key stays a one-way SHA-256 check. It is not stored in a form that can be opened.
  */
 export class ZhonnexCognitiveMemoryMesh {
   private static readonly MESH_COLLECTION = 'zhonnex_generational_mesh';
@@ -26,7 +29,7 @@ export class ZhonnexCognitiveMemoryMesh {
     ownerToken: string,
     payload: Omit<LegacyDataPayload, 'meshId' | 'isLocked'>
   ): Promise<string | null> {
-    
+
     // 1. Verify standard owner identity validity
     const { data: { user }, error } = await zhonnexIdentityClient.auth.getUser(ownerToken);
     if (error || !user) {
@@ -34,7 +37,7 @@ export class ZhonnexCognitiveMemoryMesh {
     }
 
     // 2. Minimum endowment audit to ensure file self-sustainability over 2+ generations
-    const minimumFiftyYearCostCents = 50000; // \$500 minimum capital pool to generate server yield
+    const minimumFiftyYearCostCents = 50000; // $500 minimum capital pool to generate server yield
     if (payload.endowmentBalanceCents < minimumFiftyYearCostCents) {
       throw new Error('FINANCIAL FAILURE: Insufficient endowment to anchor storage across multi-generational timeframes.');
     }
@@ -44,7 +47,7 @@ export class ZhonnexCognitiveMemoryMesh {
     const immutableRecord: LegacyDataPayload = {
       meshId: meshDocRef.id,
       originalOwnerUid: user.id,
-      encryptedDataIpfsHash: payload.encryptedDataIpfsHash,
+      encryptedDataIpfsHash: sealSevenLayers(payload.encryptedDataIpfsHash),
       hereditaryKeyHash: crypto.createHash('sha256').update(payload.hereditaryKeyHash).digest('hex'),
       isLocked: true,
       endowmentBalanceCents: payload.endowmentBalanceCents,
@@ -77,12 +80,14 @@ export class ZhonnexCognitiveMemoryMesh {
 
     // Cryptographic validation of the descendant key
     const hashedInput = crypto.createHash('sha256').update(providedSecretKey).digest('hex');
-    if (crypto.timingSafeEqual(Buffer.from(meshData.hereditaryKeyHash), Buffer.from(hashedInput))) {
-      await meshDocRef.update({ isLocked: false });
-      console.log(`🔓 [MEMORY MESH] Decryption sequence validated. Releasing secure IPFS resource hash.`);
-      return meshData.encryptedDataIpfsHash;
+    const storedHash = Buffer.from(meshData.hereditaryKeyHash);
+    const offeredHash = Buffer.from(hashedInput);
+    if (storedHash.length !== offeredHash.length || !crypto.timingSafeEqual(storedHash, offeredHash)) {
+      return null;
     }
 
-    return null;
+    await meshDocRef.update({ isLocked: false });
+    console.log(`🔓 [MEMORY MESH] Decryption sequence validated. Releasing secure IPFS resource hash.`);
+    return openSevenLayers(meshData.encryptedDataIpfsHash);
   }
 }
