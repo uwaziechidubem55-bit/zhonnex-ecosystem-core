@@ -1,0 +1,30 @@
+$('checkUpdates').onclick=async()=>{
+  const status=$('updateStatus'),details=$('updateDetails');details.hidden=true;
+  if (!RELEASE_MANIFEST_URL || !/^https:\/\//.test(RELEASE_MANIFEST_URL)) {
+    status.textContent='Online update checks are not configured yet. Your offline planner still works.';return;
+  }
+  status.textContent='Checking for updates...';
+  try {
+    const response=await fetch(RELEASE_MANIFEST_URL,{cache:'no-store',signal:AbortSignal.timeout(8000),credentials:'omit'});
+    if(!response.ok||Number(response.headers.get('content-length')||0)>16000)throw Error('Update service unavailable');
+    const text=await response.text();if(text.length>16000)throw Error('Update notice too large');
+    const data=JSON.parse(text);
+    if(data.schema!==1||!/^\d+\.\d+\.\d+$/.test(data.version)||
+       typeof data.title!=='string'||data.title.length>120||
+       !Array.isArray(data.changes)||data.changes.length>20||
+       !data.changes.every(x=>typeof x==='string'&&x.length<=250))throw Error('Invalid update notice');
+    const newer=data.version.split('.').map(Number).some((part,i,arr)=>{
+      const current=[1,0,0];return part>current[i]&&arr.slice(0,i).every((n,j)=>n===current[j]);
+    });
+    status.textContent=newer?`New version available: ${data.version}`:`You have version 1.0.0. Latest notice: ${data.version}`;
+    details.textContent=data.title+'\n'+data.changes.map(x=>'• '+x).join('\n');details.hidden=false;
+    // Never auto-download or auto-charge. Only allow publisher-owned HTTPS destinations.
+    if(newer&&typeof data.subscriptionUrl==='string'){
+      const link=new URL(data.subscriptionUrl);const manifest=new URL(RELEASE_MANIFEST_URL);
+      if(link.protocol==='https:'&&link.origin===manifest.origin){
+        const a=document.createElement('a');a.href=link.href;a.textContent='See optional subscription plans';a.rel='noopener noreferrer';a.target='_blank';details.append(document.createElement('br'),a);
+      }
+    }
+  }catch{status.textContent='Could not check right now. Your offline planner still works.';}
+};
+</script></body></html>
