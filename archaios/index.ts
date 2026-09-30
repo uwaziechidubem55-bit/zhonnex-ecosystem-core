@@ -6,24 +6,22 @@ import {
   sign,
   verify
 } from "crypto";
+import { currencyInfo, HOME_CURRENCY } from "./currencies";
 
-/** Archaios. The eighth Zhonnex software. A hash-linked ledger beside the product vault, not inside it. */
+/** Archaios. The eighth Zhonnex software. A hash-linked record of currency payments, beside the product vault, not inside it. */
 export const SOFTWARE_NAME = "Archaios";
 export const NETWORK_ID = "archaios-1";
 export const GENESIS_PREVIOUS = "0".repeat(64);
+export { HOME_CURRENCY, currencyInfo, listCurrencies } from "./currencies";
 
 const PKCS8_PREFIX = Buffer.from("302e020100300506032b657004220420", "hex");
 const SPKI_PREFIX = Buffer.from("302a300506032b6570032100", "hex");
-
-export interface GenesisGrant {
-  to: string;
-  amount: number;
-}
 
 export interface Transfer {
   from: string;
   to: string;
   amount: number;
+  currency: string;
   nonce: number;
   assetId: string;
   signature: string;
@@ -42,13 +40,19 @@ export interface Block {
 export interface Chain {
   networkId: string;
   difficulty: number;
-  grants: GenesisGrant[];
+  treasury: string;
   blocks: Block[];
 }
 
 export interface Account {
   publicKey: string;
   privateKey: string;
+}
+
+export interface CurrencyPosition {
+  currency: string;
+  received: number;
+  sent: number;
 }
 
 export function createAccount(): Account {
@@ -68,6 +72,7 @@ export function transferMessage(networkId: string, transfer: Omit<Transfer, "sig
     transfer.from,
     transfer.to,
     String(transfer.amount),
+    transfer.currency,
     String(transfer.nonce),
     transfer.assetId
   ].join("|");
@@ -108,22 +113,39 @@ export function sha256(value: string): string {
   return createHash("sha256").update(value, "utf8").digest("hex");
 }
 
-export function blockHash(chain: Pick<Chain, "networkId" | "grants">, block: Omit<Block, "hash">): string {
+/** Fixed field order so a node in another country hashes the same bytes. */
+export function canonicalTransfer(transfer: Transfer): string {
+  return JSON.stringify([
+    transfer.from,
+    transfer.to,
+    transfer.amount,
+    transfer.currency,
+    transfer.nonce,
+    transfer.assetId,
+    transfer.signature
+  ]);
+}
+
+export function blockHash(chain: Pick<Chain, "networkId" | "treasury">, block: Omit<Block, "hash">): string {
   const body = [
     chain.networkId,
-    block.index === 0 ? JSON.stringify(chain.grants) : "",
+    block.index === 0 ? chain.treasury : "",
     String(block.index),
     block.previousHash,
     String(block.timestamp),
-    JSON.stringify(block.transfers),
+    block.transfers.map(canonicalTransfer).join(","),
     String(block.nonce),
     block.miner
   ].join("|");
   return sha256(body);
 }
 
+export function genesisHash(chain: Chain): string {
+  return chain.blocks[0]?.hash ?? "";
+}
+
 export function mineBlock(
-  chain: Pick<Chain, "networkId" | "difficulty" | "grants">,
+  chain: Pick<Chain, "networkId" | "difficulty" | "treasury">,
   draft: Omit<Block, "nonce" | "hash">
 ): Block {
   const difficulty = Math.max(0, chain.difficulty);
@@ -139,11 +161,14 @@ export function mineBlock(
   throw new Error("ARCHAIOS_MINE_EXHAUSTED");
 }
 
-export function createGenesis(grants: GenesisGrant[], difficulty = 1, timestamp = 0): Chain {
+export function createGenesis(treasury: string, difficulty = 1, timestamp = 0): Chain {
+  if (!isAddress(treasury)) {
+    throw new Error("ARCHAIOS_BAD_ADDRESS");
+  }
   const chain: Chain = {
     networkId: NETWORK_ID,
     difficulty,
-    grants: grants.map((grant) => ({ to: grant.to, amount: grant.amount })),
+    treasury,
     blocks: []
   };
   const block = mineBlock(chain, {
@@ -151,22 +176,92 @@ export function createGenesis(grants: GenesisGrant[], difficulty = 1, timestamp 
     previousHash: GENESIS_PREVIOUS,
     timestamp,
     transfers: [],
-    miner: grants[0]?.to ?? "0".repeat(64)
+    miner: treasury
   });
   chain.blocks.push(block);
   return chain;
 }
 
-export function balances(chain: Chain): Map<string, number> {
-  const error = validateChain(chain);
-  if (error) {
-    throw new Error(error);
+/** Whole currency units in, minor units out. 1500.50 NGN is 150050 kobo. */
+export function parseMajor(input: string, currency: string): number | null {
+  const info = currencyInfo(currency);
+  if (!info) {
+    return null;
   }
-  return applyBalances(chain);
+  const text = input.trim().replace(/,/g, "");
+  if (!/^(?:0|[1-9]\d*)(?:\.\d+)?$/.test(text)) {
+    return null;
+  }
+  const [whole, frac = ""] = text.split(".");
+  if (frac.length > info.exponent) {
+    return null;
+  }
+  const minorText = `${whole}${frac.padEnd(info.exponent, "0")}`;
+  if (minorText.length > 15) {
+    return null;
+  }
+  const minor = Number(minorText);
+  if (!Number.isSafeInteger(minor) || minor <= 0) {
+    return null;
+  }
+  return minor;
+}
+
+export function formatMinor(amount: number, currency: string): string | null {
+  const info = currencyInfo(currency);
+  if (!info || !Number.isInteger(amount) || amount < 0 || amount > Number.MAX_SAFE_INTEGER) {
+    return null;
+  }
+  const digits = String(amount).padStart(info.exponent + 1, "0");
+  if (info.exponent === 0) {
+    return digits;
+  }
+  return `${digits.slice(0, -info.exponent)}.${digits.slice(-info.exponent)}`;
 }
 
 export function accountNonce(chain: Chain, address: string): number {
-  return balances(chain) && countNonce(chain, address);
+  if (validateChain(chain)) {
+    throw new Error("ARCHAIOS_REJECTED");
+  }
+  return countNonce(chain, address);
+}
+
+export function currencyPositions(chain: Chain, address: string): CurrencyPosition[] {
+  if (validateChain(chain) || !isAddress(address)) {
+    return [];
+  }
+  const totals = new Map<string, { received: number; sent: number }>();
+  for (const block of chain.blocks) {
+    for (const transfer of block.transfers) {
+      if (transfer.to === address) {
+        addPosition(totals, transfer.currency, transfer.amount, 0);
+      }
+      if (transfer.from === address) {
+        addPosition(totals, transfer.currency, 0, transfer.amount);
+      }
+    }
+  }
+  return [...totals.entries()]
+    .sort((left, right) => left[0].localeCompare(right[0]))
+    .map(([currency, row]) => ({ currency, received: row.received, sent: row.sent }));
+}
+
+export function paymentsReceived(chain: Chain, address: string, currency = ""): Transfer[] {
+  if (validateChain(chain) || !isAddress(address)) {
+    return [];
+  }
+  if (currency && !currencyInfo(currency)) {
+    return [];
+  }
+  const found: Transfer[] = [];
+  for (const block of chain.blocks) {
+    for (const transfer of block.transfers) {
+      if (transfer.to === address && (!currency || transfer.currency === currency)) {
+        found.push(transfer);
+      }
+    }
+  }
+  return found;
 }
 
 export function appendTransfer(chain: Chain, transfer: Transfer, miner: string, timestamp: number): Chain {
@@ -198,17 +293,13 @@ export function validateChain(chain: Chain): string | null {
   if (!Number.isInteger(chain.difficulty) || chain.difficulty < 0 || chain.difficulty > 6) {
     return "ARCHAIOS_BAD_DIFFICULTY";
   }
+  if (!isAddress(chain.treasury)) {
+    return "ARCHAIOS_BAD_ADDRESS";
+  }
   if (chain.blocks.length === 0) {
     return "ARCHAIOS_EMPTY_CHAIN";
   }
   const seen = new Map<string, number>();
-  const spent = new Map<string, number>();
-  for (const grant of chain.grants) {
-    if (!isAddress(grant.to) || !isPositiveInt(grant.amount)) {
-      return "ARCHAIOS_BAD_GRANT";
-    }
-    credit(spent, grant.to, grant.amount);
-  }
   for (let i = 0; i < chain.blocks.length; i += 1) {
     const block = chain.blocks[i];
     if (block.index !== i) {
@@ -225,7 +316,7 @@ export function validateChain(chain: Chain): string | null {
       return "ARCHAIOS_GENESIS_HAS_TRANSFERS";
     }
     for (const transfer of block.transfers) {
-      const reason = applyTransfer(chain.networkId, transfer, spent, seen);
+      const reason = applyTransfer(chain.networkId, transfer, seen);
       if (reason) {
         return reason;
       }
@@ -234,7 +325,7 @@ export function validateChain(chain: Chain): string | null {
   return null;
 }
 
-/** Longer valid chain wins. An invalid remote chain never replaces the local one. */
+/** Longer valid chain wins. A different genesis, or an invalid remote chain, never replaces the local one. */
 export function selectChain(local: Chain, remote: Chain): Chain {
   const remoteError = validateChain(remote);
   if (remoteError) {
@@ -244,6 +335,9 @@ export function selectChain(local: Chain, remote: Chain): Chain {
   if (localError) {
     return remote;
   }
+  if (genesisHash(local) !== genesisHash(remote)) {
+    return local;
+  }
   return remote.blocks.length > local.blocks.length ? remote : local;
 }
 
@@ -251,33 +345,26 @@ export function hasSettledProductPayment(
   chain: Chain,
   buyer: string,
   assetId: string,
-  minAmount = 1
+  minAmount = 1,
+  currency = HOME_CURRENCY
 ): boolean {
-  if (validateChain(chain) || !assetId) {
+  if (validateChain(chain) || !assetId || !currencyInfo(currency)) {
     return false;
   }
   return chain.blocks.some((block) =>
     block.transfers.some(
       (transfer) =>
         transfer.from === buyer &&
+        transfer.to === chain.treasury &&
         transfer.assetId === assetId &&
+        transfer.currency === currency &&
         transfer.amount >= minAmount
     )
   );
 }
 
-function applyBalances(chain: Chain): Map<string, number> {
-  const spent = new Map<string, number>();
-  const seen = new Map<string, number>();
-  for (const grant of chain.grants) {
-    credit(spent, grant.to, grant.amount);
-  }
-  for (const block of chain.blocks) {
-    for (const transfer of block.transfers) {
-      applyTransfer(chain.networkId, transfer, spent, seen);
-    }
-  }
-  return spent;
+export function isAccountAddress(value: string): boolean {
+  return isAddress(value);
 }
 
 function countNonce(chain: Chain, address: string): number {
@@ -295,11 +382,13 @@ function countNonce(chain: Chain, address: string): number {
 function applyTransfer(
   networkId: string,
   transfer: Transfer,
-  balances: Map<string, number>,
   seen: Map<string, number>
 ): string | null {
   if (!isAddress(transfer.from) || !isAddress(transfer.to) || transfer.from === transfer.to) {
     return "ARCHAIOS_BAD_ADDRESS";
+  }
+  if (!currencyInfo(transfer.currency)) {
+    return "ARCHAIOS_BAD_CURRENCY";
   }
   if (!isPositiveInt(transfer.amount) || !Number.isInteger(transfer.nonce) || transfer.nonce < 0) {
     return "ARCHAIOS_BAD_AMOUNT";
@@ -311,18 +400,20 @@ function applyTransfer(
   if (transfer.nonce !== expected) {
     return "ARCHAIOS_BAD_NONCE";
   }
-  const available = balances.get(transfer.from) ?? 0;
-  if (available < transfer.amount) {
-    return "ARCHAIOS_INSUFFICIENT";
-  }
-  balances.set(transfer.from, available - transfer.amount);
-  credit(balances, transfer.to, transfer.amount);
   seen.set(transfer.from, expected + 1);
   return null;
 }
 
-function credit(balances: Map<string, number>, address: string, amount: number): void {
-  balances.set(address, (balances.get(address) ?? 0) + amount);
+function addPosition(
+  totals: Map<string, { received: number; sent: number }>,
+  currency: string,
+  received: number,
+  sent: number
+): void {
+  const row = totals.get(currency) ?? { received: 0, sent: 0 };
+  row.received += received;
+  row.sent += sent;
+  totals.set(currency, row);
 }
 
 function privateKeyFromHex(hexKey: string) {
