@@ -1,0 +1,12 @@
+===========================================================================
+FILE: commerce-finance/product-vault/release-manifest.json
+===========================================================================
+{
+  "schema": 1,
+  "version": "1.0.0",
+  "publishedAt": "2026-09-30",
+  "title": "LaunchSprint 1.0",
+  "changes": ["30-day roadmap", "Offer builder", "Break-even calculator", "Editable copy drafts", "Local backup export"],
+  "downloadUrl": null,
+  "subscriptionUrl": null
+}
