@@ -1,0 +1,213 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Archaios wallet</title>
+<style>
+  body { margin: 0; background: #000; color: #f2f2f2; font-family: ui-monospace, monospace; }
+  main { max-width: 720px; margin: 0 auto; padding: 24px; }
+  h1 { font-size: 22px; font-weight: 600; }
+  h2 { font-size: 16px; font-weight: 600; }
+  p, label { color: #c8c8c8; line-height: 1.45; }
+  section { border: 1px solid #333; padding: 16px; margin: 16px 0; }
+  input { width: 100%; box-sizing: border-box; background: #0a0a0a; color: #fff; border: 1px solid #444; padding: 10px; margin: 6px 0 12px; }
+  button { background: #111; color: #fff; border: 1px solid #666; padding: 10px 14px; cursor: pointer; }
+  .warn { color: #e6c07b; }
+  code, .pay { color: #fff; word-break: break-all; }
+</style>
+</head>
+<body>
+<main>
+  <h1>Archaios wallet</h1>
+  <p>A payment is in naira, or in any other currency. It is not a private coin.</p>
+  <p class="warn">This page records the signed payment. It does not collect the money from a bank. The naira, or the other currency, is still paid by bank transfer or a payment company. A wage in Nigeria is still paid in naira.</p>
+  <section>
+    <h2>Payments received</h2>
+    <label>Address that receives the payment</label>
+    <input id="receive-address" placeholder="64 hex characters">
+    <label>Currency</label>
+    <input id="receive-currency" list="currency-list" value="NGN" maxlength="3">
+    <button type="button" id="show-received">Show payments received</button>
+    <div id="incoming"></div>
+  </section>
+  <section>
+    <h2>Your key</h2>
+    <p>The key is made in this browser. It is not sent to the node. The node accepts only a signed payment.</p>
+    <button type="button" id="create">Create address</button>
+    <p>Address</p>
+    <code id="address">No address yet</code>
+    <p>Private key stays in this browser. Download it and keep the file. Do not paste it into chat.</p>
+    <button type="button" id="download" disabled>Download key file</button>
+    <label>Restore from the downloaded key file</label>
+    <input id="restore-file" type="file">
+  </section>
+  <section>
+    <h2>Send a payment</h2>
+    <label>Pay to address</label>
+    <input id="to" placeholder="64 hex characters">
+    <label>Currency</label>
+    <input id="currency" list="currency-list" value="NGN" maxlength="3">
+    <label>Amount in that currency</label>
+    <input id="amount" inputmode="decimal" placeholder="1500.50">
+    <label>Asset id, only if this payment is for a product</label>
+    <input id="asset" placeholder="Leave empty for an ordinary payment">
+    <button type="button" id="send">Sign and send</button>
+    <p id="status"></p>
+  </section>
+  <datalist id="currency-list"></datalist>
+</main>
+<script>
+const addressEl = document.getElementById("address");
+const statusEl = document.getElementById("status");
+const incomingEl = document.getElementById("incoming");
+const node = location.origin;
+let keys = null;
+let exponents = {};
+
+function hex(bytes) {
+  return [...bytes].map((b) => b.toString(16).padStart(2, "0")).join("");
+}
+function bytes(hexText) {
+  const clean = hexText.trim();
+  const out = new Uint8Array(clean.length / 2);
+  for (let i = 0; i < out.length; i += 1) out[i] = parseInt(clean.slice(i * 2, i * 2 + 2), 16);
+  return out;
+}
+function message(networkId, transfer) {
+  return ["archaios-transfer", networkId, transfer.from, transfer.to, String(transfer.amount), transfer.currency, String(transfer.nonce), transfer.assetId].join("|");
+}
+function currencyCode(id) {
+  return document.getElementById(id).value.trim().toUpperCase();
+}
+function parseMajor(input, currency) {
+  const exponent = exponents[currency];
+  if (exponent === undefined) return null;
+  const text = input.trim().replace(/,/g, "");
+  if (!/^(?:0|[1-9]\d*)(?:\.\d+)?$/.test(text)) return null;
+  const parts = text.split(".");
+  const whole = parts[0];
+  const frac = parts[1] || "";
+  if (frac.length > exponent) return null;
+  const minorText = whole + frac.padEnd(exponent, "0");
+  if (minorText.length > 15) return null;
+  const minor = Number(minorText);
+  if (!Number.isInteger(minor) || minor <= 0) return null;
+  return minor;
+}
+function line(parent, text) {
+  const row = document.createElement("p");
+  row.className = "pay";
+  row.textContent = text;
+  parent.appendChild(row);
+}
+
+document.getElementById("create").onclick = async () => {
+  const pair = await crypto.subtle.generateKey({ name: "Ed25519" }, true, ["sign"]);
+  const pub = new Uint8Array(await crypto.subtle.exportKey("raw", pair.publicKey));
+  const priv = new Uint8Array(await crypto.subtle.exportKey("pkcs8", pair.privateKey));
+  keys = { publicKey: hex(pub), privateKey: hex(priv.slice(-32)), signingKey: pair.privateKey };
+  showAddress("Address created on this browser.");
+};
+
+document.getElementById("restore-file").onchange = async (event) => {
+  const file = event.target.files && event.target.files[0];
+  if (!file) return;
+  const [publicKey, privateKey] = (await file.text()).trim().split(/\s+/);
+  const prefix = new Uint8Array([0x30,0x2e,0x02,0x01,0x00,0x30,0x05,0x06,0x03,0x2b,0x65,0x70,0x04,0x22,0x04,0x20]);
+  const raw = bytes(privateKey);
+  const pkcs8 = new Uint8Array(prefix.length + raw.length);
+  pkcs8.set(prefix, 0);
+  pkcs8.set(raw, prefix.length);
+  const signingKey = await crypto.subtle.importKey("pkcs8", pkcs8, { name: "Ed25519" }, false, ["sign"]);
+  keys = { publicKey, privateKey, signingKey };
+  showAddress("Key restored on this browser. It was not sent to the node.");
+};
+
+function showAddress(note) {
+  addressEl.textContent = keys.publicKey;
+  document.getElementById("download").disabled = false;
+  statusEl.textContent = note;
+}
+
+document.getElementById("download").onclick = () => {
+  if (!keys) return;
+  const blob = new Blob([keys.publicKey + "\n" + keys.privateKey + "\n"], { type: "text/plain" });
+  const link = document.createElement("a");
+  link.href = URL.createObjectURL(blob);
+  link.download = "archaios-private-key.txt";
+  link.click();
+};
+
+document.getElementById("show-received").onclick = async () => {
+  incomingEl.replaceChildren();
+  const address = document.getElementById("receive-address").value.trim();
+  const currency = currencyCode("receive-currency");
+  if (!exponents[currency]) {
+    line(incomingEl, "Currency must be naira or another currency code, such as USD.");
+    return;
+  }
+  const response = await fetch(node + "/received?address=" + address + "&currency=" + currency);
+  const body = await response.json();
+  if (!response.ok) {
+    line(incomingEl, body.error);
+    return;
+  }
+  const position = (body.positions || []).find((row) => row.currency === currency);
+  line(incomingEl, position ? ("Received " + position.displayReceived + " " + currency) : ("Received 0 " + currency));
+  if (!body.payments.length) {
+    line(incomingEl, "No payment received in " + currency + " yet.");
+    return;
+  }
+  body.payments.forEach((payment) => {
+    const asset = payment.assetId ? (" for " + payment.assetId) : "";
+    line(incomingEl, payment.display + " " + payment.currency + " from " + payment.from + asset);
+  });
+};
+
+document.getElementById("send").onclick = async () => {
+  if (!keys) { statusEl.textContent = "Create an address first."; return; }
+  const currency = currencyCode("currency");
+  const amount = parseMajor(document.getElementById("amount").value, currency);
+  const to = document.getElementById("to").value.trim();
+  if (amount === null || !/^[0-9a-f]{64}$/.test(to)) {
+    statusEl.textContent = "Use a real currency code and an amount in that currency. Naira uses two decimal places. The address must be 64 hex characters.";
+    return;
+  }
+  const account = await (await fetch(node + "/received?address=" + keys.publicKey)).json();
+  const chain = await (await fetch(node + "/chain")).json();
+  const transfer = {
+    from: keys.publicKey,
+    to,
+    amount,
+    currency,
+    nonce: account.nonce,
+    assetId: document.getElementById("asset").value
+  };
+  const signature = await crypto.subtle.sign({ name: "Ed25519" }, keys.signingKey, new TextEncoder().encode(message(chain.networkId, transfer)));
+  const response = await fetch(node + "/transfer", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ ...transfer, signature: hex(new Uint8Array(signature)) })
+  });
+  const result = await response.json();
+  statusEl.textContent = response.ok ? ("Recorded in block " + result.height + ". The bank payment is separate.") : result.error;
+};
+
+fetch(node + "/health").then((response) => response.json()).then((health) => {
+  document.getElementById("receive-address").value = health.treasury;
+  document.getElementById("to").value = health.treasury;
+});
+fetch(node + "/currencies").then((response) => response.json()).then((rows) => {
+  const list = document.getElementById("currency-list");
+  rows.forEach((row) => {
+    exponents[row.code] = row.exponent;
+    const option = document.createElement("option");
+    option.value = row.code;
+    option.label = row.name;
+    list.appendChild(option);
+  });
+});
+</script>
+</body>
+</html>
