@@ -14,5 +14,6 @@
     "commerce-finance/**/*.ts",
     "shared-packages/**/*.ts",
     "resolve/**/*.ts"
+    "archaios/**/*.ts"
   ]
 }
