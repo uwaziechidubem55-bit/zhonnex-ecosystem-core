@@ -1,4 +1,11 @@
 import { zhonnexIdentityClient } from '../../core-applications/identity-auth/supabase/client';
+import {
+  Chain,
+  hasSettledProductPayment,
+  ownershipMessage,
+  validateChain,
+  verifyBytes
+} from '../../archaios/index';
 import * as crypto from 'crypto';
 
 interface DeliveryManifest {
@@ -9,41 +16,55 @@ interface DeliveryManifest {
 }
 
 /**
- * Enterprise Product Vault Engine.
- * Manages access isolation for digital distribution and software delivery pipelines.
+ * Product vault. Signs a short download only after Archaios has recorded the payment
+ * and the logged-in user has proved they hold the paying key.
  */
 export class ProductVaultManager {
   private static readonly TOKEN_SECRET_ALGO = 'sha256';
-  private static readonly VAULT_SIGNING_KEY = process.env.ZHONNEX_VAULT_SIGNING_SECRET || 'fallback-dev-secret-key-32-chars';
+  private static readonly VAULT_SIGNING_KEY = process.env.ZHONNEX_VAULT_SIGNING_SECRET;
 
   /**
-   * Generates a single-use, cryptographically sealed asset access manifest.
-   * Prevents link sharing and software duplication over unverified public layers.
+   * Generates a 15-minute download signature.
+   * Refuses if the Archaios chain is invalid, the purchase is missing, or the key proof fails.
    */
   public static async generateSecuredStreamManifest(
     userBearerToken: string,
-    targetAssetId: string
+    targetAssetId: string,
+    chain: Chain,
+    buyerAddress: string,
+    ownershipSignature: string
   ): Promise<DeliveryManifest | null> {
-    
-    // 1. Authenticate user access boundaries via central Identity Auth client
+    if (!this.VAULT_SIGNING_KEY || this.VAULT_SIGNING_KEY.length < 32) {
+      throw new Error('CRITICAL ARCHITECTURE CONFIGURATION ERROR: ZHONNEX_VAULT_SIGNING_SECRET must be at least 32 characters and must not live in source.');
+    }
+
     const { data: { user }, error } = await zhonnexIdentityClient.auth.getUser(userBearerToken);
     if (error || !user) {
-      console.error(`[VAULT DENIAL] Access token evaluation failed for target asset allocation request.`);
+      console.error('[VAULT DENIAL] Access token evaluation failed for target asset allocation request.');
       return null;
     }
 
-    // 2. Validate user licensing rules from the database mapping (Simplified mock for system independence)
-    const accessExpirationWindowInSeconds = 900; // Hard 15-minute token expiry ceiling
-    const expiryTime = Math.floor(Date.now() / 1000) + accessExpirationWindowInSeconds;
+    if (validateChain(chain) !== null) {
+      console.error('[VAULT DENIAL] Archaios chain rejected.');
+      return null;
+    }
+    if (!verifyBytes(ownershipMessage(chain.networkId, user.id, targetAssetId), ownershipSignature, buyerAddress)) {
+      console.error('[VAULT DENIAL] Archaios key does not belong to this signed-in user.');
+      return null;
+    }
+    if (!hasSettledProductPayment(chain, buyerAddress, targetAssetId)) {
+      console.error('[VAULT DENIAL] No settled Archaios payment for this asset.');
+      return null;
+    }
 
-    // 3. Craft cryptographically secure localized parameters
+    const accessExpirationWindowInSeconds = 900;
+    const expiryTime = Math.floor(Date.now() / 1000) + accessExpirationWindowInSeconds;
     const accessPayload = `${user.id}:${targetAssetId}:${expiryTime}`;
     const cryptographicSignature = crypto
       .createHmac(this.TOKEN_SECRET_ALGO, this.VAULT_SIGNING_KEY)
       .update(accessPayload)
       .digest('hex');
 
-    // 4. Return localized cloud paths for streaming delivery infrastructure to consume
     return {
       assetId: targetAssetId,
       vaultStoragePath: `production-vault-storage/distribution-binaries/${targetAssetId}.bin`,
@@ -52,13 +73,13 @@ export class ProductVaultManager {
     };
   }
 
-  /**
-   * Evaluates if a generated token signature is valid and authenticates file server output pipeline streams
-   */
   public static verifyStreamManifestSignature(manifest: Omit<DeliveryManifest, 'vaultStoragePath'>, userId: string): boolean {
+    if (!this.VAULT_SIGNING_KEY || this.VAULT_SIGNING_KEY.length < 32) {
+      return false;
+    }
     if (Date.now() / 1000 > manifest.expirationTimestamp) {
       console.warn(`[VAULT ALERT] Terminated expired token signature intercept for user reference: ${userId}`);
-      return false; // Token has aged past safety tolerance values
+      return false;
     }
 
     const reconstructedPayload = `${userId}:${manifest.assetId}:${manifest.expirationTimestamp}`;
@@ -66,7 +87,11 @@ export class ProductVaultManager {
       .createHmac(this.TOKEN_SECRET_ALGO, this.VAULT_SIGNING_KEY)
       .update(reconstructedPayload)
       .digest('hex');
-
-    return crypto.timingSafeEqual(Buffer.from(manifest.downloadTokenSignature), Buffer.from(referenceSignature));
+    const offered = Buffer.from(manifest.downloadTokenSignature);
+    const expected = Buffer.from(referenceSignature);
+    if (offered.length !== expected.length) {
+      return false;
+    }
+    return crypto.timingSafeEqual(offered, expected);
   }
 }
