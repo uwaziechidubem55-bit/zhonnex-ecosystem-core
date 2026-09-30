@@ -7,11 +7,24 @@ import {
   verify
 } from "crypto";
 import { currencyInfo, HOME_CURRENCY } from "./currencies";
+import { functionSelector } from "./keccak";
 
 /** Archaios. The eighth Zhonnex software. A hash-linked record of currency payments, beside the product vault, not inside it. */
 export const SOFTWARE_NAME = "Archaios";
 export const NETWORK_ID = "archaios-1";
 export const GENESIS_PREVIOUS = "0".repeat(64);
+/** ERC-20 transfer starts with these four bytes. Archaios is not that coin. */
+export const ERC20_TRANSFER_FUNCTION = "transfer(address,uint256)";
+export const ERC20_TRANSFER_SELECTOR = functionSelector(ERC20_TRANSFER_FUNCTION);
+/** Same construction as ERC-20: first 4 bytes of Keccak-256 of the canonical function. */
+export const PAYMENT_FUNCTION = "transfer(bytes32,bytes32,uint256,bytes3,uint256,string)";
+export const PAYMENT_SELECTOR = functionSelector(PAYMENT_FUNCTION);
+export const OWNER_FUNCTION = "proveOwner(string,string,string)";
+export const OWNER_SELECTOR = functionSelector(OWNER_FUNCTION);
+
+if (ERC20_TRANSFER_SELECTOR !== "a9059cbb" || PAYMENT_SELECTOR !== "70a8c498" || OWNER_SELECTOR !== "af1469d7") {
+  throw new Error("ARCHAIOS_KECCAK_MISMATCH");
+}
 export { HOME_CURRENCY, currencyInfo, listCurrencies } from "./currencies";
 
 const PKCS8_PREFIX = Buffer.from("302e020100300506032b657004220420", "hex");
@@ -65,10 +78,11 @@ export function createAccount(): Account {
   };
 }
 
-export function transferMessage(networkId: string, transfer: Omit<Transfer, "signature">): string {
+export function transferMessage(networkId: string, genesis: string, transfer: Omit<Transfer, "signature">): string {
   return [
-    "archaios-transfer",
+    PAYMENT_SELECTOR,
     networkId,
+    genesis,
     transfer.from,
     transfer.to,
     String(transfer.amount),
@@ -79,7 +93,11 @@ export function transferMessage(networkId: string, transfer: Omit<Transfer, "sig
 }
 
 export function ownershipMessage(networkId: string, userId: string, assetId: string): string {
-  return ["archaios-owner", networkId, userId, assetId].join("|");
+  return [OWNER_SELECTOR, networkId, userId, assetId].join("|");
+}
+
+export function packPaymentSignature(rawSignatureHex: string): string {
+  return PAYMENT_SELECTOR + rawSignatureHex;
 }
 
 export function signBytes(message: string, privateKeyHex: string): string {
@@ -100,13 +118,25 @@ export function verifyBytes(message: string, signatureHex: string, publicKeyHex:
 
 export function signTransfer(
   networkId: string,
+  genesis: string,
   transfer: Omit<Transfer, "signature">,
   privateKeyHex: string
 ): Transfer {
   return {
     ...transfer,
-    signature: signBytes(transferMessage(networkId, transfer), privateKeyHex)
+    signature: packPaymentSignature(signBytes(transferMessage(networkId, genesis, transfer), privateKeyHex))
   };
+}
+
+export function verifyTransferSignature(networkId: string, genesis: string, transfer: Transfer): boolean {
+  if (!transfer.signature.startsWith(PAYMENT_SELECTOR) || transfer.signature.length !== PAYMENT_SELECTOR.length + 128) {
+    return false;
+  }
+  return verifyBytes(
+    transferMessage(networkId, genesis, transfer),
+    transfer.signature.slice(PAYMENT_SELECTOR.length),
+    transfer.from
+  );
 }
 
 export function sha256(value: string): string {
@@ -116,6 +146,7 @@ export function sha256(value: string): string {
 /** Fixed field order so a node in another country hashes the same bytes. */
 export function canonicalTransfer(transfer: Transfer): string {
   return JSON.stringify([
+    PAYMENT_SELECTOR,
     transfer.from,
     transfer.to,
     transfer.amount,
@@ -129,6 +160,7 @@ export function canonicalTransfer(transfer: Transfer): string {
 export function blockHash(chain: Pick<Chain, "networkId" | "treasury">, block: Omit<Block, "hash">): string {
   const body = [
     chain.networkId,
+    PAYMENT_SELECTOR,
     block.index === 0 ? chain.treasury : "",
     String(block.index),
     block.previousHash,
@@ -300,6 +332,7 @@ export function validateChain(chain: Chain): string | null {
     return "ARCHAIOS_EMPTY_CHAIN";
   }
   const seen = new Map<string, number>();
+  let genesis = "";
   for (let i = 0; i < chain.blocks.length; i += 1) {
     const block = chain.blocks[i];
     if (block.index !== i) {
@@ -312,11 +345,14 @@ export function validateChain(chain: Chain): string | null {
     if (block.hash !== blockHash(chain, block) || !block.hash.startsWith("0".repeat(chain.difficulty))) {
       return "ARCHAIOS_BAD_HASH";
     }
+    if (i === 0) {
+      genesis = block.hash;
+    }
     if (i === 0 && block.transfers.length !== 0) {
       return "ARCHAIOS_GENESIS_HAS_TRANSFERS";
     }
     for (const transfer of block.transfers) {
-      const reason = applyTransfer(chain.networkId, transfer, seen);
+      const reason = applyTransfer(chain.networkId, genesis, transfer, seen);
       if (reason) {
         return reason;
       }
@@ -381,6 +417,7 @@ function countNonce(chain: Chain, address: string): number {
 
 function applyTransfer(
   networkId: string,
+  genesis: string,
   transfer: Transfer,
   seen: Map<string, number>
 ): string | null {
@@ -393,7 +430,7 @@ function applyTransfer(
   if (!isPositiveInt(transfer.amount) || !Number.isInteger(transfer.nonce) || transfer.nonce < 0) {
     return "ARCHAIOS_BAD_AMOUNT";
   }
-  if (!verifyBytes(transferMessage(networkId, transfer), transfer.signature, transfer.from)) {
+  if (!verifyTransferSignature(networkId, genesis, transfer)) {
     return "ARCHAIOS_BAD_SIGNATURE";
   }
   const expected = seen.get(transfer.from) ?? 0;
