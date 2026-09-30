@@ -21,7 +21,8 @@
 <main>
   <h1>Archaios wallet</h1>
   <p>A payment is in naira, or in any other currency. It is not a private coin.</p>
-  <p class="warn">This page records the signed payment. It does not collect the money from a bank. The naira, or the other currency, is still paid by bank transfer or a payment company. A wage in Nigeria is still paid in naira.</p>
+  <p>Every payment starts with <code id="selector">70a8c498</code>. ERC-20 transfer starts with <code>a9059cbb</code>. This uses that same four-byte construction. It is not an ERC-20 coin.</p>
+  <p class="warn">The private key file is encrypted on this browser. The passphrase is not sent to the node. This page records the signed payment. It does not collect the money from a bank. A wage in Nigeria is still paid in naira.</p>
   <section>
     <h2>Payments received</h2>
     <label>Address that receives the payment</label>
@@ -37,9 +38,11 @@
     <button type="button" id="create">Create address</button>
     <p>Address</p>
     <code id="address">No address yet</code>
-    <p>Private key stays in this browser. Download it and keep the file. Do not paste it into chat.</p>
-    <button type="button" id="download" disabled>Download key file</button>
-    <label>Restore from the downloaded key file</label>
+    <label>Passphrase for the key file, at least 12 characters</label>
+    <input id="passphrase" type="password" autocomplete="new-password">
+    <p>Download stores the public address, then the encrypted private key. Do not paste the file into chat.</p>
+    <button type="button" id="download" disabled>Download encrypted key file</button>
+    <label>Restore from the encrypted key file</label>
     <input id="restore-file" type="file">
   </section>
   <section>
@@ -58,6 +61,10 @@
   <datalist id="currency-list"></datalist>
 </main>
 <script>
+const PAYMENT_SELECTOR = "70a8c498";
+const ERC20_TRANSFER_SELECTOR = "a9059cbb";
+const KEY_FILE_HEADER = "archaios-key-1";
+const SEAL_ITERATIONS = 600000;
 const addressEl = document.getElementById("address");
 const statusEl = document.getElementById("status");
 const incomingEl = document.getElementById("incoming");
@@ -74,11 +81,14 @@ function bytes(hexText) {
   for (let i = 0; i < out.length; i += 1) out[i] = parseInt(clean.slice(i * 2, i * 2 + 2), 16);
   return out;
 }
-function message(networkId, transfer) {
-  return ["archaios-transfer", networkId, transfer.from, transfer.to, String(transfer.amount), transfer.currency, String(transfer.nonce), transfer.assetId].join("|");
+function message(networkId, genesis, transfer) {
+  return [PAYMENT_SELECTOR, networkId, genesis, transfer.from, transfer.to, String(transfer.amount), transfer.currency, String(transfer.nonce), transfer.assetId].join("|");
 }
 function currencyCode(id) {
   return document.getElementById(id).value.trim().toUpperCase();
+}
+function passphrase() {
+  return document.getElementById("passphrase").value;
 }
 function parseMajor(input, currency) {
   const exponent = exponents[currency];
@@ -101,27 +111,52 @@ function line(parent, text) {
   row.textContent = text;
   parent.appendChild(row);
 }
+async function derive(passphraseText, salt) {
+  const base = await crypto.subtle.importKey("raw", new TextEncoder().encode(passphraseText), "PBKDF2", false, ["deriveKey"]);
+  return crypto.subtle.deriveKey(
+    { name: "PBKDF2", salt, iterations: SEAL_ITERATIONS, hash: "SHA-256" },
+    base,
+    { name: "AES-GCM", length: 256 },
+    false,
+    ["encrypt", "decrypt"]
+  );
+}
 
 document.getElementById("create").onclick = async () => {
   const pair = await crypto.subtle.generateKey({ name: "Ed25519" }, true, ["sign"]);
   const pub = new Uint8Array(await crypto.subtle.exportKey("raw", pair.publicKey));
   const priv = new Uint8Array(await crypto.subtle.exportKey("pkcs8", pair.privateKey));
   keys = { publicKey: hex(pub), privateKey: hex(priv.slice(-32)), signingKey: pair.privateKey };
-  showAddress("Address created on this browser.");
+  showAddress("Address created on this browser. Encrypt it before you download it.");
 };
 
 document.getElementById("restore-file").onchange = async (event) => {
   const file = event.target.files && event.target.files[0];
   if (!file) return;
-  const [publicKey, privateKey] = (await file.text()).trim().split(/\s+/);
-  const prefix = new Uint8Array([0x30,0x2e,0x02,0x01,0x00,0x30,0x05,0x06,0x03,0x2b,0x65,0x70,0x04,0x22,0x04,0x20]);
-  const raw = bytes(privateKey);
-  const pkcs8 = new Uint8Array(prefix.length + raw.length);
-  pkcs8.set(prefix, 0);
-  pkcs8.set(raw, prefix.length);
-  const signingKey = await crypto.subtle.importKey("pkcs8", pkcs8, { name: "Ed25519" }, false, ["sign"]);
-  keys = { publicKey, privateKey, signingKey };
-  showAddress("Key restored on this browser. It was not sent to the node.");
+  if (passphrase().length < 12) {
+    statusEl.textContent = "Enter the passphrase for this key file first. It needs at least 12 characters.";
+    return;
+  }
+  const parts = (await file.text()).trim().split(/\s+/);
+  if (parts.length !== 6 || parts[0] !== KEY_FILE_HEADER) {
+    statusEl.textContent = "This key file is not encrypted.";
+    return;
+  }
+  try {
+    const key = await derive(passphrase(), bytes(parts[3]));
+    const plain = new Uint8Array(await crypto.subtle.decrypt({ name: "AES-GCM", iv: bytes(parts[4]) }, key, bytes(parts[5])));
+    const privateKey = hex(plain);
+    const prefix = new Uint8Array([0x30,0x2e,0x02,0x01,0x00,0x30,0x05,0x06,0x03,0x2b,0x65,0x70,0x04,0x22,0x04,0x20]);
+    const raw = bytes(privateKey);
+    const pkcs8 = new Uint8Array(prefix.length + raw.length);
+    pkcs8.set(prefix, 0);
+    pkcs8.set(raw, prefix.length);
+    const signingKey = await crypto.subtle.importKey("pkcs8", pkcs8, { name: "Ed25519" }, false, ["sign"]);
+    keys = { publicKey: parts[1], privateKey, signingKey };
+    showAddress("Encrypted key opened on this browser. It was not sent to the node.");
+  } catch (error) {
+    statusEl.textContent = "Wrong passphrase, or the file is damaged.";
+  }
 };
 
 function showAddress(note) {
@@ -130,13 +165,24 @@ function showAddress(note) {
   statusEl.textContent = note;
 }
 
-document.getElementById("download").onclick = () => {
+document.getElementById("download").onclick = async () => {
   if (!keys) return;
-  const blob = new Blob([keys.publicKey + "\n" + keys.privateKey + "\n"], { type: "text/plain" });
+  if (passphrase().length < 12) {
+    statusEl.textContent = "Choose a passphrase of at least 12 characters. It encrypts the key file.";
+    return;
+  }
+  statusEl.textContent = "Encrypting the key.";
+  const salt = crypto.getRandomValues(new Uint8Array(16));
+  const iv = crypto.getRandomValues(new Uint8Array(12));
+  const key = await derive(passphrase(), salt);
+  const cipher = new Uint8Array(await crypto.subtle.encrypt({ name: "AES-GCM", iv }, key, bytes(keys.privateKey)));
+  const body = [KEY_FILE_HEADER, keys.publicKey, String(SEAL_ITERATIONS), hex(salt), hex(iv), hex(cipher)].join("\n") + "\n";
+  const blob = new Blob([body], { type: "text/plain" });
   const link = document.createElement("a");
   link.href = URL.createObjectURL(blob);
-  link.download = "archaios-private-key.txt";
+  link.download = "archaios-encrypted-key.txt";
   link.click();
+  statusEl.textContent = "Encrypted key file downloaded. The passphrase was not sent to the node.";
 };
 
 document.getElementById("show-received").onclick = async () => {
@@ -161,7 +207,8 @@ document.getElementById("show-received").onclick = async () => {
   }
   body.payments.forEach((payment) => {
     const asset = payment.assetId ? (" for " + payment.assetId) : "";
-    line(incomingEl, payment.display + " " + payment.currency + " from " + payment.from + asset);
+    const start = (payment.signature || "").slice(0, 8);
+    line(incomingEl, payment.display + " " + payment.currency + " from " + payment.from + asset + ". Starts with " + start);
   });
 };
 
@@ -174,6 +221,11 @@ document.getElementById("send").onclick = async () => {
     statusEl.textContent = "Use a real currency code and an amount in that currency. Naira uses two decimal places. The address must be 64 hex characters.";
     return;
   }
+  const health = await (await fetch(node + "/health")).json();
+  if (health.paymentSelector !== PAYMENT_SELECTOR || health.erc20TransferSelector !== ERC20_TRANSFER_SELECTOR) {
+    statusEl.textContent = "This node does not have the expected starting signature.";
+    return;
+  }
   const account = await (await fetch(node + "/received?address=" + keys.publicKey)).json();
   const chain = await (await fetch(node + "/chain")).json();
   const transfer = {
@@ -184,19 +236,22 @@ document.getElementById("send").onclick = async () => {
     nonce: account.nonce,
     assetId: document.getElementById("asset").value
   };
-  const signature = await crypto.subtle.sign({ name: "Ed25519" }, keys.signingKey, new TextEncoder().encode(message(chain.networkId, transfer)));
+  const signature = await crypto.subtle.sign({ name: "Ed25519" }, keys.signingKey, new TextEncoder().encode(message(chain.networkId, chain.blocks[0].hash, transfer)));
   const response = await fetch(node + "/transfer", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ ...transfer, signature: hex(new Uint8Array(signature)) })
+    body: JSON.stringify({ ...transfer, signature: PAYMENT_SELECTOR + hex(new Uint8Array(signature)) })
   });
   const result = await response.json();
-  statusEl.textContent = response.ok ? ("Recorded in block " + result.height + ". The bank payment is separate.") : result.error;
+  statusEl.textContent = response.ok ? ("Recorded in block " + result.height + ". Signature starts with " + PAYMENT_SELECTOR + ". The bank payment is separate.") : result.error;
 };
 
 fetch(node + "/health").then((response) => response.json()).then((health) => {
   document.getElementById("receive-address").value = health.treasury;
   document.getElementById("to").value = health.treasury;
+  if (health.paymentSelector && health.paymentSelector !== PAYMENT_SELECTOR) {
+    statusEl.textContent = "Starting signature on this node does not match this wallet.";
+  }
 });
 fetch(node + "/currencies").then((response) => response.json()).then((rows) => {
   const list = document.getElementById("currency-list");
