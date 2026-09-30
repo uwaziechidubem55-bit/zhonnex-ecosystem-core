@@ -4,6 +4,13 @@ import { dirname } from "path";
 import {
   Chain,
   Transfer,
+  ERC20_TRANSFER_FUNCTION,
+  ERC20_TRANSFER_SELECTOR,
+  HOME_CURRENCY,
+  NETWORK_ID,
+  PAYMENT_FUNCTION,
+  PAYMENT_SELECTOR,
+  SOFTWARE_NAME,
   accountNonce,
   appendTransfer,
   createAccount,
@@ -12,19 +19,26 @@ import {
   currencyPositions,
   formatMinor,
   genesisHash,
-  HOME_CURRENCY,
   isAccountAddress,
   listCurrencies,
   paymentsReceived,
   selectChain,
-  validateChain,
-  SOFTWARE_NAME,
-  NETWORK_ID
+  validateChain
 } from "./index";
+import {
+  CHAIN_FILE_HEADER,
+  KEY_FILE_HEADER,
+  MIN_PASSPHRASE,
+  createChainSeal,
+  openChain,
+  sealChainWithKey,
+  sealPrivateKey
+} from "./seal";
 
 export interface NodeOptions {
   chainPath: string;
   walletPath: string;
+  passphrase: string;
   peerUrl?: string;
   port?: number;
 }
@@ -34,38 +48,60 @@ export interface NodeState {
   treasuryAddress: string;
 }
 
-const state: { chain: Chain | null; treasuryAddress: string; chainPath: string } = {
+const state: {
+  chain: Chain | null;
+  treasuryAddress: string;
+  chainPath: string;
+  passphrase: string;
+  chainKey: CryptoKey | null;
+  chainSalt: Uint8Array | null;
+} = {
   chain: null,
   treasuryAddress: "",
-  chainPath: ""
+  chainPath: "",
+  passphrase: "",
+  chainKey: null,
+  chainSalt: null
 };
 
-export function loadOrCreate(chainPath: string): NodeState {
+export async function loadOrCreate(chainPath: string, passphrase: string): Promise<NodeState> {
+  if (passphrase.length < MIN_PASSPHRASE) {
+    throw new Error("ARCHAIOS_KEY_PASSPHRASE_REQUIRED");
+  }
   mkdirSync(dirname(chainPath), { recursive: true });
+  state.passphrase = passphrase;
+  state.chainPath = chainPath;
   if (existsSync(chainPath)) {
-    const chain = JSON.parse(readFileSync(chainPath, "utf8")) as Chain;
+    const opened = await openChain(readFileSync(chainPath, "utf8"), passphrase);
+    const chain = JSON.parse(opened.json) as Chain;
     const error = validateChain(chain);
     if (error) {
       throw new Error(error);
     }
     state.chain = chain;
-    state.chainPath = chainPath;
+    state.chainKey = opened.key;
+    state.chainSalt = opened.salt;
     state.treasuryAddress = chain.treasury;
     return { chain, treasuryAddress: chain.treasury };
   }
   const treasury = createAccount();
   const keyPath = `${chainPath}.treasury.key`;
-  writeFileSync(keyPath, `${treasury.publicKey}\n${treasury.privateKey}\n`, { mode: 0o600 });
+  writeFileSync(keyPath, await sealPrivateKey(treasury.publicKey, treasury.privateKey, passphrase), { mode: 0o600 });
   const chain = createGenesis(treasury.publicKey, 1, 1);
-  writeFileSync(chainPath, JSON.stringify(chain), { mode: 0o600 });
+  const sealed = await createChainSeal(JSON.stringify(chain), passphrase);
+  writeFileSync(chainPath, sealed.text, { mode: 0o600 });
   state.chain = chain;
-  state.chainPath = chainPath;
+  state.chainKey = sealed.key;
+  state.chainSalt = sealed.salt;
   state.treasuryAddress = treasury.publicKey;
   return { chain, treasuryAddress: treasury.publicKey };
 }
 
-export function saveChain(chain: Chain): void {
-  writeFileSync(state.chainPath, JSON.stringify(chain), { mode: 0o600 });
+export async function saveChain(chain: Chain): Promise<void> {
+  if (!state.chainKey || !state.chainSalt || !state.chainPath) {
+    throw new Error("ARCHAIOS_NODE_NOT_READY");
+  }
+  writeFileSync(state.chainPath, await sealChainWithKey(JSON.stringify(chain), state.chainKey, state.chainSalt), { mode: 0o600 });
   state.chain = chain;
 }
 
@@ -84,23 +120,23 @@ export async function pullPeer(peerUrl: string): Promise<boolean> {
   const remote = await response.json() as Chain;
   const chosen = selectChain(currentChain(), remote);
   if (chosen !== currentChain() && genesisHash(chosen) === genesisHash(currentChain())) {
-    saveChain(chosen);
+    await saveChain(chosen);
     return true;
   }
   if (!existsSync(state.chainPath) && validateChain(remote) === null) {
-    saveChain(remote);
+    await saveChain(remote);
     return true;
   }
   return false;
 }
 
-export function acceptTransfer(transfer: Transfer): { ok: true; height: number; hash: string } | { ok: false; error: string } {
+export async function acceptTransfer(transfer: Transfer): Promise<{ ok: true; height: number; hash: string } | { ok: false; error: string }> {
   if ("privateKey" in (transfer as unknown as Record<string, unknown>)) {
     return { ok: false, error: "ARCHAIOS_PRIVATE_KEY_REFUSED" };
   }
   try {
     const next = appendTransfer(currentChain(), transfer, state.treasuryAddress || transfer.to, Date.now());
-    saveChain(next);
+    await saveChain(next);
     const tip = next.blocks[next.blocks.length - 1];
     return { ok: true, height: tip.index, hash: tip.hash };
   } catch (error) {
@@ -108,7 +144,7 @@ export function acceptTransfer(transfer: Transfer): { ok: true; height: number; 
   }
 }
 
-export function acceptRemoteChain(remote: Chain): { ok: boolean; adopted: boolean; error?: string } {
+export async function acceptRemoteChain(remote: Chain): Promise<{ ok: boolean; adopted: boolean; error?: string }> {
   const error = validateChain(remote);
   if (error) {
     return { ok: false, adopted: false, error };
@@ -119,7 +155,7 @@ export function acceptRemoteChain(remote: Chain): { ok: boolean; adopted: boolea
   const chosen = selectChain(currentChain(), remote);
   const adopted = chosen !== currentChain();
   if (adopted) {
-    saveChain(chosen);
+    await saveChain(chosen);
   }
   return { ok: true, adopted };
 }
@@ -159,7 +195,8 @@ function receivedView(address: string, currency: string): { ok: true; body: unkn
     currency: transfer.currency,
     display: formatMinor(transfer.amount, transfer.currency),
     nonce: transfer.nonce,
-    assetId: transfer.assetId
+    assetId: transfer.assetId,
+    signature: transfer.signature
   }));
   const positions = currencyPositions(chain, address)
     .filter((row) => !currency || row.currency === currency)
@@ -192,11 +229,14 @@ export async function startNode(options: NodeOptions): Promise<void> {
       const remote = await response.json() as Chain;
       if (validateChain(remote) === null) {
         mkdirSync(dirname(options.chainPath), { recursive: true });
-        writeFileSync(options.chainPath, JSON.stringify(remote), { mode: 0o600 });
+        state.chainPath = options.chainPath;
+        state.passphrase = options.passphrase;
+        const sealed = await createChainSeal(JSON.stringify(remote), options.passphrase);
+        writeFileSync(options.chainPath, sealed.text, { mode: 0o600 });
       }
     }
   }
-  loadOrCreate(options.chainPath);
+  await loadOrCreate(options.chainPath, options.passphrase);
   const wallet = readFileSync(options.walletPath, "utf8");
   const port = options.port ?? 3001;
   const server = createServer(async (req, res) => {
@@ -218,7 +258,15 @@ export async function startNode(options: NodeOptions): Promise<void> {
           height: chain.blocks.length - 1,
           genesis: genesisHash(chain),
           treasury: chain.treasury,
-          homeCurrency: HOME_CURRENCY
+          homeCurrency: HOME_CURRENCY,
+          encryption: "AES-256-GCM",
+          keyDerivation: "PBKDF2-SHA-256",
+          paymentFunction: PAYMENT_FUNCTION,
+          paymentSelector: PAYMENT_SELECTOR,
+          erc20TransferFunction: ERC20_TRANSFER_FUNCTION,
+          erc20TransferSelector: ERC20_TRANSFER_SELECTOR,
+          chainFile: CHAIN_FILE_HEADER,
+          keyFile: KEY_FILE_HEADER
         });
         return;
       }
@@ -237,13 +285,13 @@ export async function startNode(options: NodeOptions): Promise<void> {
       }
       if (req.method === "POST" && url.pathname === "/transfer") {
         const transfer = JSON.parse(await readBody(req)) as Transfer;
-        const result = acceptTransfer(transfer);
+        const result = await acceptTransfer(transfer);
         send(res, result.ok ? 200 : 400, result);
         return;
       }
       if (req.method === "POST" && url.pathname === "/sync") {
         const remote = JSON.parse(await readBody(req)) as Chain;
-        send(res, 200, acceptRemoteChain(remote));
+        send(res, 200, await acceptRemoteChain(remote));
         return;
       }
       send(res, 404, { error: "ARCHAIOS_NOT_FOUND" });
@@ -263,7 +311,11 @@ if (process.argv[1] && /node\.(ts|js)$/.test(process.argv[1])) {
   startNode({
     chainPath: process.env.ARCHAIOS_CHAIN_PATH ?? "/home/user/zhonnex-ecosystem-core/archaios/data/chain.json",
     walletPath: process.env.ARCHAIOS_WALLET_PATH ?? "/home/user/zhonnex-ecosystem-core/archaios/wallet.html",
+    passphrase: process.env.ARCHAIOS_KEY_PASSPHRASE ?? "",
     peerUrl: process.env.ARCHAIOS_PEER,
     port: Number(process.env.PORT ?? 3001)
+  }).catch((error) => {
+    console.error(error instanceof Error ? error.message : "ARCHAIOS_REJECTED");
+    process.exit(1);
   });
 }
